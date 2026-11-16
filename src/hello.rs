@@ -73,13 +73,13 @@ mod win {
 
     use super::sealed;
 
-    const NAME: &str = "bwquick";
-    const CHALLENGE: &[u8] = b"bwquick-windows-hello-unlock-v1";
+    const NAME: &str = "quickwarden";
+    const CHALLENGE: &[u8] = b"quickwarden-windows-hello-unlock-v1";
 
     fn file() -> Option<PathBuf> {
         Some(
             PathBuf::from(std::env::var_os("APPDATA")?)
-                .join("bwquick")
+                .join("quickwarden")
                 .join("hello.bin"),
         )
     }

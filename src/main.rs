@@ -18,7 +18,7 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Bitwarden Quick")
+            .with_title("Quickwarden")
             .with_inner_size([780.0, 470.0])
             .with_always_on_top()
             .with_resizable(false)
@@ -28,7 +28,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "bwquick",
+        "quickwarden",
         options,
         Box::new(|cc| {
             let hotkeys = GlobalHotKeyManager::new()?;

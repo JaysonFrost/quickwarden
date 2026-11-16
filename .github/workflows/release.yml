@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: quickwarden-windows-x64.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: quickwarden-macos-apple-silicon.zip
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: quickwarden-macos-intel.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+          Copy-Item target/${{ matrix.target }}/release/quickwarden.exe ${{ matrix.asset }}
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ./macos-bundle.sh ${{ matrix.target }}
+          ditto -c -k --keepParent target/Quickwarden.app ${{ matrix.asset }}
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
+          generate_release_notes: true

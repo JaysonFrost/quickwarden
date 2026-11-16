@@ -108,10 +108,13 @@ mod win {
     #[test]
     #[ignore]
     fn reads_browser_url_from_env_window() {
-        let handle: isize = std::env::var("BWQ_TEST_HWND").unwrap().parse().unwrap();
+        let handle: isize = std::env::var("QUICKWARDEN_TEST_HWND")
+            .unwrap()
+            .parse()
+            .unwrap();
         let ctx = Ctx {
             handle,
-            app: std::env::var("BWQ_TEST_APP").unwrap(),
+            app: std::env::var("QUICKWARDEN_TEST_APP").unwrap(),
             ..Default::default()
         };
         let url = url(&ctx);

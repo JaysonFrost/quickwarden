@@ -1,7 +1,19 @@
 [package]
-name = "bwquick"
+name = "quickwarden"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "Quick access for Bitwarden: a global-hotkey password picker with autofill, TOTP and Windows Hello for Windows and macOS"
+license = "MIT"
+repository = "https://github.com/JaysonFrost/quickwarden"
+readme = "README.md"
+keywords = ["bitwarden", "password-manager", "autofill", "totp", "quick-access"]
+categories = ["authentication", "gui"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
 
 [dependencies]
 aes-gcm = "0.11.1"

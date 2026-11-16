@@ -85,8 +85,8 @@ pub fn status(session: Option<&str>) -> Result<String, String> {
 pub fn unlock(password: &str) -> Result<String, String> {
     let out = run(
         None,
-        &["unlock", "--passwordenv", "BWQ_PASSWORD", "--raw"],
-        &[("BWQ_PASSWORD", password)],
+        &["unlock", "--passwordenv", "QUICKWARDEN_PASSWORD", "--raw"],
+        &[("QUICKWARDEN_PASSWORD", password)],
     )?;
     Ok(out.trim().to_string())
 }
