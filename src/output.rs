@@ -2,11 +2,17 @@ use std::time::Duration;
 
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
-use crate::vault::Item;
+use crate::totp;
 
 const CLEAR_CLIPBOARD_AFTER: Duration = Duration::from_secs(30);
 
-pub fn type_login(item: &Item, full: bool) -> Result<(), String> {
+pub enum Part {
+    Text(String),
+    Tab,
+    Totp(String),
+}
+
+pub fn type_parts(parts: &[Part]) -> Result<(), String> {
     let mut keys = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
     let held = if cfg!(target_os = "macos") {
         &[Key::Shift, Key::Control, Key::Meta][..]
@@ -16,12 +22,17 @@ pub fn type_login(item: &Item, full: bool) -> Result<(), String> {
     for &k in held {
         let _ = keys.key(k, Direction::Release);
     }
-    if full && !item.username.is_empty() {
-        keys.text(&item.username).map_err(|e| e.to_string())?;
-        keys.key(Key::Tab, Direction::Click)
-            .map_err(|e| e.to_string())?;
+    for part in parts {
+        match part {
+            Part::Text(text) => keys.text(text),
+            Part::Tab => keys.key(Key::Tab, Direction::Click),
+            Part::Totp(secret) => {
+                keys.text(&totp::current(secret).map(|c| c.code).unwrap_or_default())
+            }
+        }
+        .map_err(|e| e.to_string())?;
     }
-    keys.text(&item.password).map_err(|e| e.to_string())
+    Ok(())
 }
 
 fn set_clipboard(value: &str) -> Result<(), arboard::Error> {

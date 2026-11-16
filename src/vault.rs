@@ -5,16 +5,15 @@ use serde::Deserialize;
 
 #[derive(Clone, Debug, Default)]
 pub struct Item {
-    pub id: String,
     pub name: String,
     pub username: String,
     pub password: String,
+    pub totp: String,
     pub uris: Vec<String>,
 }
 
 #[derive(Deserialize)]
 struct RawItem {
-    id: String,
     #[serde(rename = "type")]
     kind: u8,
     name: Option<String>,
@@ -25,6 +24,7 @@ struct RawItem {
 struct RawLogin {
     username: Option<String>,
     password: Option<String>,
+    totp: Option<String>,
     uris: Option<Vec<RawUri>>,
 }
 
@@ -104,10 +104,10 @@ fn parse(raw: Vec<RawItem>) -> Vec<Item> {
         .filter_map(|i| {
             let login = i.login?;
             Some(Item {
-                id: i.id,
                 name: i.name.unwrap_or_default(),
                 username: login.username.unwrap_or_default(),
                 password: login.password.unwrap_or_default(),
+                totp: login.totp.unwrap_or_default(),
                 uris: login
                     .uris
                     .unwrap_or_default()
@@ -117,12 +117,6 @@ fn parse(raw: Vec<RawItem>) -> Vec<Item> {
             })
         })
         .collect()
-}
-
-pub fn totp(session: &str, id: &str) -> Result<String, String> {
-    Ok(run(Some(session), &["get", "totp", id], &[])?
-        .trim()
-        .to_string())
 }
 
 pub fn lock(session: &str) {

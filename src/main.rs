@@ -4,7 +4,10 @@ mod app;
 mod context;
 mod matcher;
 mod output;
+mod theme;
+mod totp;
 mod vault;
+mod views;
 
 use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
@@ -14,9 +17,11 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Bitwarden Quick")
-            .with_inner_size([560.0, 360.0])
+            .with_inner_size([780.0, 470.0])
             .with_always_on_top()
-            .with_resizable(false),
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_transparent(true),
         centered: true,
         ..Default::default()
     };

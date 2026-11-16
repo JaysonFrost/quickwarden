@@ -33,15 +33,22 @@ Then grant `bwquick` **Accessibility** in System Settings → Privacy & Security
 
 ## Keys
 
-| Key | Action |
+The window lists logins on the left and the selected login's fields (email or username, password, one-time password with a live countdown) on the right. Click a field to type it into the previous app, or press its Copy button.
+
+| Key (Cmd instead of Ctrl on macOS) | Action |
 | --- | --- |
 | `Ctrl+Shift+Space` | Open picker (the key combination is reserved by bwquick while it runs) |
-| Enter / double-click | Type username, Tab, password into the previous window |
+| ↑ / ↓ | Move through logins, or through fields in the field pane |
+| → or Tab / ← or Esc | Enter / leave the field pane |
+| Enter / double-click | Type username, Tab, password; in the field pane type only the selected field |
 | Shift+Enter | Type password only |
-| Ctrl+C / Ctrl+U / Ctrl+T (Cmd on macOS) | Copy password / username / TOTP; cleared after 30 s |
-| Ctrl+L (Cmd+L) | Lock vault |
-| Ctrl+Q (Cmd+Q) | Quit |
-| Esc / window close button | Hide |
+| Ctrl+1 / Ctrl+2 / Ctrl+3 | Type username / password / one-time code of the selected login |
+| Ctrl+C | Copy the selected field (password in the list); cleared after 30 s |
+| Ctrl+L | Lock vault |
+| Ctrl+Q | Quit |
+| Esc / click outside | Hide |
+
+One-time codes are computed locally from the login's TOTP secret (Base32 or `otpauth://` URI).
 
 ## Context matching
 

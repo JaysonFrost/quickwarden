@@ -5,29 +5,88 @@ use eframe::egui::{self, Event, Key, Modifiers, ViewportCommand};
 use global_hotkey::GlobalHotKeyManager;
 
 use crate::context::{self, Ctx};
+use crate::output::{self, Part};
 use crate::vault::{self, Item};
-use crate::{matcher, output};
+use crate::{matcher, totp};
 
 const LOCK_AFTER: Duration = Duration::from_secs(15 * 60);
 const FILL_DELAY: Duration = Duration::from_millis(250);
-const HELP: &str =
-    "Enter fill · Shift+Enter password · Ctrl/⌘ +C password +U user +T TOTP +L lock +Q quit";
 
 pub enum Msg {
     Show,
     Status(Result<String, String>),
     Unlocked(Result<(String, Vec<Item>), String>),
     Loaded(Result<Vec<Item>, String>),
-    Totp(Result<String, String>),
     Url(isize, String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Mode {
+pub enum Mode {
     Checking,
     Locked,
     Ready,
     LoggedOut,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Pane {
+    List,
+    Fields,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Field {
+    Username,
+    Password,
+    Totp,
+}
+
+pub enum Action {
+    Fill(usize, Option<Field>),
+    Copy(usize, Field),
+}
+
+impl Field {
+    pub fn raw(self, item: &Item) -> &str {
+        match self {
+            Field::Username => &item.username,
+            Field::Password => &item.password,
+            Field::Totp => &item.totp,
+        }
+    }
+
+    pub fn value(self, item: &Item) -> String {
+        match self {
+            Field::Totp => totp::current(&item.totp)
+                .map(|c| c.code)
+                .unwrap_or_default(),
+            _ => self.raw(item).to_string(),
+        }
+    }
+
+    pub fn label(self, item: &Item) -> &'static str {
+        match self {
+            Field::Username if item.username.contains('@') => "email",
+            Field::Username => "username",
+            Field::Password => "password",
+            Field::Totp => "one-time password",
+        }
+    }
+
+    pub fn shortcut(self) -> &'static str {
+        match self {
+            Field::Username => "1",
+            Field::Password => "2",
+            Field::Totp => "3",
+        }
+    }
+}
+
+pub fn fields(item: &Item) -> Vec<Field> {
+    [Field::Username, Field::Password, Field::Totp]
+        .into_iter()
+        .filter(|f| !f.raw(item).is_empty())
+        .collect()
 }
 
 pub struct App {
@@ -36,18 +95,21 @@ pub struct App {
     rx: Receiver<Msg>,
     _hotkeys: GlobalHotKeyManager,
     session: Option<String>,
-    items: Vec<Item>,
-    ctx: Ctx,
-    query: String,
-    selected: usize,
-    scroll_to_selected: bool,
-    mode: Mode,
-    busy: bool,
-    status: String,
+    pub(crate) items: Vec<Item>,
+    pub(crate) ctx: Ctx,
+    pub(crate) query: String,
+    pub(crate) selected: usize,
+    pub(crate) pane: Pane,
+    pub(crate) field: usize,
+    pub(crate) scroll_to_selected: bool,
+    pub(crate) mode: Mode,
+    pub(crate) busy: bool,
+    pub(crate) error: String,
     visible: bool,
+    had_focus: bool,
     quitting: bool,
     last_used: Instant,
-    pending_fill: Option<(Item, bool, Instant)>,
+    pending_fill: Option<(Vec<Part>, Instant)>,
 }
 
 impl App {
@@ -67,11 +129,14 @@ impl App {
             ctx: Ctx::default(),
             query: String::new(),
             selected: 0,
+            pane: Pane::List,
+            field: 0,
             scroll_to_selected: false,
             mode: Mode::Checking,
             busy: false,
-            status: String::new(),
+            error: String::new(),
             visible: true,
+            had_focus: false,
             quitting: false,
             last_used: Instant::now(),
             pending_fill: None,
@@ -91,7 +156,7 @@ impl App {
 
     fn check_status(&mut self) {
         self.mode = Mode::Checking;
-        self.status = "Checking vault...".into();
+        self.error.clear();
         let session = self.session.clone();
         self.spawn(move || Msg::Status(vault::status(session.as_deref())));
     }
@@ -103,16 +168,11 @@ impl App {
         match msg {
             Msg::Show => self.show(),
             Msg::Status(Ok(s)) if s == "unlocked" && self.session.is_some() => {
-                self.status = "Loading vault...".into();
                 let session = self.session.clone().unwrap_or_default();
                 self.spawn(move || Msg::Loaded(vault::load(&session)));
             }
-            Msg::Status(Ok(s)) if s == "unauthenticated" => {
-                self.mode = Mode::LoggedOut;
-                self.status =
-                    "Run `bw login` in a terminal, then press Ctrl+Shift+Space again".into();
-            }
-            Msg::Status(Ok(_)) => self.set_locked("Master password, Enter to unlock"),
+            Msg::Status(Ok(s)) if s == "unauthenticated" => self.mode = Mode::LoggedOut,
+            Msg::Status(Ok(_)) => self.set_locked(""),
             Msg::Status(Err(e)) => self.set_locked(&e),
             Msg::Unlocked(Ok((session, items))) => {
                 self.session = Some(session);
@@ -123,8 +183,6 @@ impl App {
                 self.session = None;
                 self.set_locked(&e);
             }
-            Msg::Totp(Ok(code)) => self.copy(code, "TOTP"),
-            Msg::Totp(Err(e)) => self.status = e,
             Msg::Url(handle, url) => {
                 if handle == self.ctx.handle && !url.is_empty() {
                     self.ctx.url = url;
@@ -133,19 +191,25 @@ impl App {
         }
     }
 
-    fn set_locked(&mut self, status: &str) {
+    fn set_locked(&mut self, error: &str) {
         self.mode = Mode::Locked;
         self.items.clear();
         self.query.clear();
-        self.status = status.to_string();
+        self.error = error.to_string();
     }
 
     fn set_ready(&mut self, items: Vec<Item>) {
         self.mode = Mode::Ready;
         self.items = items;
         self.query.clear();
+        self.error.clear();
+        self.reset_selection();
+    }
+
+    pub(crate) fn reset_selection(&mut self) {
         self.selected = 0;
-        self.status = HELP.into();
+        self.pane = Pane::List;
+        self.field = 0;
     }
 
     fn show(&mut self) {
@@ -158,8 +222,9 @@ impl App {
                 egui.request_repaint();
             });
             self.query.clear();
-            self.selected = 0;
+            self.reset_selection();
             self.visible = true;
+            self.had_focus = false;
             self.egui.send_viewport_cmd(ViewportCommand::Visible(true));
         }
         self.last_used = Instant::now();
@@ -172,9 +237,11 @@ impl App {
         }
     }
 
-    fn hide(&mut self) {
+    fn hide(&mut self, refocus: bool) {
         if self.visible {
-            context::focus(&self.ctx);
+            if refocus {
+                context::focus(&self.ctx);
+            }
             self.visible = false;
             self.egui.send_viewport_cmd(ViewportCommand::Visible(false));
         }
@@ -184,47 +251,69 @@ impl App {
         if let Some(session) = self.session.take() {
             std::thread::spawn(move || vault::lock(&session));
         }
-        self.set_locked("Locked. Master password, Enter to unlock");
+        self.set_locked("");
     }
 
-    fn copy(&mut self, value: String, what: &str) {
-        if value.is_empty() {
-            self.status = format!("No {what}");
-            return;
-        }
-        match output::copy_secret(value) {
-            Ok(()) => self.hide(),
-            Err(e) => self.status = e,
+    pub(crate) fn unlock(&mut self) {
+        if self.mode == Mode::Locked && !self.busy && !self.query.is_empty() {
+            let password = std::mem::take(&mut self.query);
+            self.error.clear();
+            self.spawn(move || {
+                Msg::Unlocked(
+                    vault::unlock(&password).and_then(|s| vault::load(&s).map(|items| (s, items))),
+                )
+            });
         }
     }
 
-    fn submit(&mut self, current: Option<usize>, full: bool) {
-        match self.mode {
-            Mode::Locked if !self.busy && !self.query.is_empty() => {
-                let password = std::mem::take(&mut self.query);
-                self.status = "Unlocking...".into();
-                self.spawn(move || {
-                    Msg::Unlocked(
-                        vault::unlock(&password)
-                            .and_then(|s| vault::load(&s).map(|items| (s, items))),
-                    )
-                });
+    pub(crate) fn run(&mut self, action: Action) {
+        match action {
+            Action::Fill(n, field) => {
+                let item = &self.items[n];
+                let parts = match field {
+                    None if !item.username.is_empty() => {
+                        vec![
+                            Part::Text(item.username.clone()),
+                            Part::Tab,
+                            Part::Text(item.password.clone()),
+                        ]
+                    }
+                    None => vec![Part::Text(item.password.clone())],
+                    Some(Field::Totp) => vec![Part::Totp(item.totp.clone())],
+                    Some(f) => vec![Part::Text(f.value(item))],
+                };
+                self.pending_fill = Some((parts, Instant::now() + FILL_DELAY));
+                self.hide(true);
+                self.egui.request_repaint_after(FILL_DELAY);
             }
-            Mode::Ready => {
-                if let Some(n) = current {
-                    self.pending_fill =
-                        Some((self.items[n].clone(), full, Instant::now() + FILL_DELAY));
-                    self.hide();
-                    self.egui.request_repaint_after(FILL_DELAY);
+            Action::Copy(n, field) => {
+                let value = field.value(&self.items[n]);
+                if value.is_empty() {
+                    self.error = format!("No {}", field.label(&self.items[n]));
+                    return;
+                }
+                match output::copy_secret(value) {
+                    Ok(()) => self.hide(true),
+                    Err(e) => self.error = e,
                 }
             }
-            _ => {}
         }
     }
 
-    fn keys(&mut self, ui: &mut egui::Ui, results: &[(u8, usize)]) {
-        let current = results.get(self.selected).map(|&(_, n)| n);
-        let pressed = ui.input_mut(|i| {
+    pub(crate) fn results(&self) -> Vec<(u8, usize)> {
+        if self.mode == Mode::Ready {
+            matcher::search(&self.items, &self.query, &self.ctx)
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub(crate) fn current(&self, results: &[(u8, usize)]) -> Option<usize> {
+        results.get(self.selected).map(|&(_, n)| n)
+    }
+
+    fn keys(&mut self, ctx: &egui::Context, results: &[(u8, usize)]) {
+        let pressed = ctx.input_mut(|i| {
             let copy = i.events.iter().any(|e| matches!(e, Event::Copy));
             i.events.retain(|e| !matches!(e, Event::Copy));
             [
@@ -233,9 +322,14 @@ impl App {
                 i.consume_key(Modifiers::NONE, Key::Escape),
                 i.consume_key(Modifiers::NONE, Key::ArrowUp),
                 i.consume_key(Modifiers::NONE, Key::ArrowDown),
+                i.consume_key(Modifiers::NONE, Key::ArrowRight)
+                    || i.consume_key(Modifiers::NONE, Key::Tab),
+                i.consume_key(Modifiers::NONE, Key::ArrowLeft)
+                    || i.consume_key(Modifiers::SHIFT, Key::Tab),
                 copy,
-                i.consume_key(Modifiers::COMMAND, Key::U),
-                i.consume_key(Modifiers::COMMAND, Key::T),
+                i.consume_key(Modifiers::COMMAND, Key::Num1),
+                i.consume_key(Modifiers::COMMAND, Key::Num2),
+                i.consume_key(Modifiers::COMMAND, Key::Num3),
                 i.consume_key(Modifiers::COMMAND, Key::L),
                 i.consume_key(Modifiers::COMMAND, Key::Q),
             ]
@@ -246,51 +340,93 @@ impl App {
             escape,
             up,
             down,
+            right,
+            left,
             copy,
-            user,
-            totp,
+            f1,
+            f2,
+            f3,
             lock,
             quit,
         ] = pressed;
-        if shift_enter || enter {
-            self.submit(current, !shift_enter);
-        }
-        if escape {
-            self.hide();
-        }
-        if (up || down) && !results.is_empty() {
-            self.selected = if up {
-                self.selected.saturating_sub(1)
-            } else {
-                (self.selected + 1).min(results.len() - 1)
-            };
-            self.scroll_to_selected = true;
-        }
-        if let Some(n) = current.filter(|_| self.mode == Mode::Ready) {
-            if copy {
-                self.copy(self.items[n].password.clone(), "password");
-            }
-            if user {
-                self.copy(self.items[n].username.clone(), "username");
-            }
-            if totp && !self.busy {
-                let (session, id) = (
-                    self.session.clone().unwrap_or_default(),
-                    self.items[n].id.clone(),
-                );
-                self.status = "Getting TOTP...".into();
-                self.spawn(move || Msg::Totp(vault::totp(&session, &id)));
-            }
-        }
-        if lock && self.mode == Mode::Ready {
-            self.lock();
-        }
+
         if quit {
             self.quitting = true;
             if let Some(session) = self.session.take() {
                 vault::lock(&session);
             }
             self.egui.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
+        if escape {
+            if self.pane == Pane::Fields {
+                self.pane = Pane::List;
+            } else {
+                self.hide(true);
+            }
+        }
+        if self.mode == Mode::Locked && (enter || shift_enter) {
+            self.unlock();
+        }
+        if self.mode != Mode::Ready {
+            return;
+        }
+        if lock {
+            self.lock();
+            return;
+        }
+        let Some(n) = self.current(results) else {
+            return;
+        };
+        let item_fields = fields(&self.items[n]);
+        self.field = self.field.min(item_fields.len().saturating_sub(1));
+        match self.pane {
+            Pane::List => {
+                if up || down {
+                    self.selected = if up {
+                        self.selected.saturating_sub(1)
+                    } else {
+                        (self.selected + 1).min(results.len() - 1)
+                    };
+                    self.scroll_to_selected = true;
+                }
+                if right && !item_fields.is_empty() {
+                    self.pane = Pane::Fields;
+                    self.field = 0;
+                }
+            }
+            Pane::Fields => {
+                if up {
+                    self.field = self.field.saturating_sub(1);
+                }
+                if down {
+                    self.field = (self.field + 1).min(item_fields.len().saturating_sub(1));
+                }
+                if left {
+                    self.pane = Pane::List;
+                }
+            }
+        }
+        let focused_field = item_fields
+            .get(self.field)
+            .copied()
+            .filter(|_| self.pane == Pane::Fields);
+        if shift_enter {
+            self.run(Action::Fill(n, Some(Field::Password)));
+        } else if enter {
+            self.run(Action::Fill(n, focused_field));
+        } else if copy {
+            self.run(Action::Copy(n, focused_field.unwrap_or(Field::Password)));
+        } else if let Some(f) = [
+            (f1, Field::Username),
+            (f2, Field::Password),
+            (f3, Field::Totp),
+        ]
+        .into_iter()
+        .find_map(|(hit, f)| hit.then_some(f))
+        .filter(|f| item_fields.contains(f))
+        {
+            self.run(Action::Fill(n, Some(f)));
         }
     }
 }
@@ -300,13 +436,13 @@ impl eframe::App for App {
         while let Ok(msg) = self.rx.try_recv() {
             self.handle(msg);
         }
-        if let Some((_, _, at)) = &self.pending_fill {
+        if let Some((_, at)) = &self.pending_fill {
             let now = Instant::now();
             if now >= *at {
-                if let Some((item, full, _)) = self.pending_fill.take()
-                    && let Err(e) = output::type_login(&item, full)
+                if let Some((parts, _)) = self.pending_fill.take()
+                    && let Err(e) = output::type_parts(&parts)
                 {
-                    self.status = e;
+                    self.error = e;
                 }
             } else {
                 ctx.request_repaint_after(*at - now);
@@ -319,74 +455,29 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_secs(30));
             }
         }
+        if self.visible {
+            let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
+            if self.had_focus && !focused && self.pending_fill.is_none() {
+                self.hide(false);
+            }
+            self.had_focus = focused;
+        }
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            self.hide();
+            self.hide(true);
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let results = if self.mode == Mode::Ready {
-            matcher::search(&self.items, &self.query, &self.ctx)
-        } else {
-            Vec::new()
-        };
+        let results = self.results();
         self.selected = self.selected.min(results.len().saturating_sub(1));
-        self.keys(ui, &results);
+        self.keys(ui.ctx(), &results);
+        if self.visible {
+            self.draw(ui, &results);
+        }
+    }
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            let hint = match self.mode {
-                Mode::Ready => "Search logins",
-                Mode::Locked => "Master password",
-                Mode::Checking => "Checking vault...",
-                Mode::LoggedOut => "Not logged in",
-            };
-            let input = egui::TextEdit::singleline(&mut self.query)
-                .password(self.mode != Mode::Ready)
-                .hint_text(hint)
-                .font(egui::TextStyle::Heading)
-                .desired_width(f32::INFINITY);
-            let enabled = !self.busy && matches!(self.mode, Mode::Ready | Mode::Locked);
-            let response = ui.add_enabled(enabled, input);
-            if enabled && !response.has_focus() {
-                response.request_focus();
-            }
-            if response.changed() {
-                self.selected = 0;
-            }
-            ui.add_space(6.0);
-
-            let list_height = ui.available_height() - 24.0;
-            let mut fill = None;
-            egui::ScrollArea::vertical()
-                .max_height(list_height)
-                .auto_shrink(false)
-                .show(ui, |ui| {
-                    for (row, &(score, n)) in results.iter().enumerate() {
-                        let item = &self.items[n];
-                        let star = if score > 0 { "★ " } else { "    " };
-                        let text = format!("{star}{}  —  {}", item.name, item.username);
-                        let r = ui.add_sized(
-                            [ui.available_width(), 22.0],
-                            egui::Button::selectable(row == self.selected, text),
-                        );
-                        if row == self.selected && self.scroll_to_selected {
-                            r.scroll_to_me(None);
-                        }
-                        if r.clicked() {
-                            self.selected = row;
-                        }
-                        if r.double_clicked() {
-                            fill = Some(n);
-                        }
-                    }
-                });
-            self.scroll_to_selected = false;
-            if fill.is_some() {
-                self.submit(fill, true);
-            }
-            ui.separator();
-            ui.small(&self.status);
-        });
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
     }
 }
