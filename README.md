@@ -44,6 +44,8 @@ The window lists logins on the left and the selected login's fields (email or us
 | Shift+Enter | Type password only |
 | Ctrl+1 / Ctrl+2 / Ctrl+3 | Type username / password / one-time code of the selected login |
 | Ctrl+C | Copy the selected field (password in the list); cleared after 30 s |
+| Ctrl+V in the master password field | Paste and unlock immediately |
+| Ctrl+H | Unlock with Windows Hello |
 | Ctrl+L | Lock vault |
 | Ctrl+Q | Quit |
 | Esc / click outside | Hide |
@@ -57,10 +59,18 @@ The active window is captured when the hotkey is pressed:
 - Browser URL: Windows reads the address bar of Chrome, Edge, Brave, Vivaldi, Opera and Firefox through UI Automation; macOS asks Safari and Chromium browsers via AppleScript. A host match (including subdomains) ranks highest.
 - Otherwise the window title and process name are matched against each login's domain name (`github` for `github.com`) and item name.
 
+## Windows Hello
+
+After the first unlock with the master password, Windows asks once for your face, fingerprint or PIN to set up Windows Hello. From then on the picker unlocks with Windows Hello instead of the master password.
+
+The `bw` session key is encrypted with AES-256-GCM using a key derived from a Windows Hello signature (the private key stays in the TPM and signs only after Windows Hello verification) and stored in `%APPDATA%\bwquick\hello.bin`. The master password is never stored. While Windows Hello is set up, locking only clears bwquick's memory and does not run `bw lock`, so the stored session stays valid. Running `bw lock` or `bw logout` yourself invalidates it; bwquick then deletes `hello.bin` and asks for the master password again.
+
+The Windows build links the C runtime statically, so `bwquick.exe` runs on a clean Windows without the Visual C++ Redistributable.
+
 ## Security notes
 
 - Unlocking uses `bw unlock --passwordenv`; the master password is passed through the child process environment, never on the command line. The session key and decrypted logins stay in this process's memory only.
-- The vault locks after 15 minutes without use, on Ctrl+L and on quit (`bw lock`, which also invalidates other `BW_SESSION` keys).
+- The vault locks after 15 minutes without use, on Ctrl+L and on quit. Without Windows Hello this also runs `bw lock`, which invalidates other `BW_SESSION` keys.
 - `bw serve` is not used, so no local HTTP port exposes the vault.
 - Copied secrets are marked to stay out of clipboard history (Windows `Win+V`, cloud clipboard, macOS clipboard managers that honour the concealed type).
 - If `BW_SESSION` is set when bwquick starts, it reuses that session.

@@ -1,21 +1,24 @@
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Event, Key, Modifiers, ViewportCommand};
+use eframe::egui::{self, ViewportCommand};
 use global_hotkey::GlobalHotKeyManager;
 
 use crate::context::{self, Ctx};
 use crate::output::{self, Part};
 use crate::vault::{self, Item};
-use crate::{matcher, totp};
+use crate::{hello, matcher, totp};
 
 const LOCK_AFTER: Duration = Duration::from_secs(15 * 60);
 const FILL_DELAY: Duration = Duration::from_millis(250);
+const SESSION_EXPIRED: &str = "Saved Windows Hello unlock expired, enter the master password";
 
 pub enum Msg {
     Show,
     Status(Result<String, String>),
     Unlocked(Result<(String, Vec<Item>), String>),
+    HelloUnlocked(Result<(String, Vec<Item>), String>),
+    Enrolled(Result<(), String>),
     Loaded(Result<Vec<Item>, String>),
     Url(isize, String),
 }
@@ -90,11 +93,11 @@ pub fn fields(item: &Item) -> Vec<Field> {
 }
 
 pub struct App {
-    egui: egui::Context,
+    pub(crate) egui: egui::Context,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     _hotkeys: GlobalHotKeyManager,
-    session: Option<String>,
+    pub(crate) session: Option<String>,
     pub(crate) items: Vec<Item>,
     pub(crate) ctx: Ctx,
     pub(crate) query: String,
@@ -107,7 +110,9 @@ pub struct App {
     pub(crate) error: String,
     visible: bool,
     had_focus: bool,
-    quitting: bool,
+    pub(crate) quitting: bool,
+    pub(crate) hello_prompt: bool,
+    pub(crate) paste_unlock: bool,
     last_used: Instant,
     pending_fill: Option<(Vec<Part>, Instant)>,
 }
@@ -138,6 +143,8 @@ impl App {
             visible: true,
             had_focus: false,
             quitting: false,
+            hello_prompt: false,
+            paste_unlock: false,
             last_used: Instant::now(),
             pending_fill: None,
         };
@@ -162,8 +169,14 @@ impl App {
     }
 
     fn handle(&mut self, msg: Msg) {
-        if !matches!(msg, Msg::Show | Msg::Url(..)) {
+        if !matches!(msg, Msg::Show | Msg::Url(..) | Msg::Enrolled(_)) {
             self.busy = false;
+        }
+        if matches!(msg, Msg::HelloUnlocked(_) | Msg::Enrolled(_)) {
+            self.hello_prompt = false;
+            if self.visible {
+                self.egui.send_viewport_cmd(ViewportCommand::Focus);
+            }
         }
         match msg {
             Msg::Show => self.show(),
@@ -172,11 +185,34 @@ impl App {
                 self.spawn(move || Msg::Loaded(vault::load(&session)));
             }
             Msg::Status(Ok(s)) if s == "unauthenticated" => self.mode = Mode::LoggedOut,
-            Msg::Status(Ok(_)) => self.set_locked(""),
+            Msg::Status(Ok(_)) => {
+                self.set_locked("");
+                if hello::enrolled() && self.visible {
+                    self.hello_unlock();
+                }
+            }
             Msg::Status(Err(e)) => self.set_locked(&e),
             Msg::Unlocked(Ok((session, items))) => {
+                if !hello::enrolled() {
+                    self.hello_enroll(session.clone());
+                }
                 self.session = Some(session);
                 self.set_ready(items);
+            }
+            Msg::HelloUnlocked(Ok((session, items))) => {
+                self.session = Some(session);
+                self.set_ready(items);
+            }
+            Msg::HelloUnlocked(Err(e)) => {
+                if e == SESSION_EXPIRED {
+                    hello::forget();
+                }
+                self.set_locked(&e);
+            }
+            Msg::Enrolled(result) => {
+                if let Err(e) = result {
+                    self.error = format!("Windows Hello not set up: {e}");
+                }
             }
             Msg::Loaded(Ok(items)) => self.set_ready(items),
             Msg::Unlocked(Err(e)) | Msg::Loaded(Err(e)) => {
@@ -237,7 +273,7 @@ impl App {
         }
     }
 
-    fn hide(&mut self, refocus: bool) {
+    pub(crate) fn hide(&mut self, refocus: bool) {
         if self.visible {
             if refocus {
                 context::focus(&self.ctx);
@@ -247,11 +283,43 @@ impl App {
         }
     }
 
-    fn lock(&mut self) {
-        if let Some(session) = self.session.take() {
+    pub(crate) fn lock(&mut self) {
+        if let Some(session) = self.session.take()
+            && !hello::enrolled()
+        {
             std::thread::spawn(move || vault::lock(&session));
         }
         self.set_locked("");
+    }
+
+    pub(crate) fn hello_unlock(&mut self) {
+        if self.mode != Mode::Locked || self.busy || !hello::enrolled() {
+            return;
+        }
+        self.error.clear();
+        self.hello_prompt = true;
+        self.spawn(|| {
+            Msg::HelloUnlocked(hello::unlock().and_then(|session| {
+                if vault::status(Some(&session))? != "unlocked" {
+                    return Err(SESSION_EXPIRED.to_string());
+                }
+                vault::load(&session).map(|items| (session, items))
+            }))
+        });
+    }
+
+    fn hello_enroll(&mut self, session: String) {
+        let (tx, egui) = (self.tx.clone(), self.egui.clone());
+        self.hello_prompt = true;
+        std::thread::spawn(move || {
+            let result = if hello::available() {
+                hello::enroll(&session)
+            } else {
+                Ok(())
+            };
+            let _ = tx.send(Msg::Enrolled(result));
+            egui.request_repaint();
+        });
     }
 
     pub(crate) fn unlock(&mut self) {
@@ -311,124 +379,6 @@ impl App {
     pub(crate) fn current(&self, results: &[(u8, usize)]) -> Option<usize> {
         results.get(self.selected).map(|&(_, n)| n)
     }
-
-    fn keys(&mut self, ctx: &egui::Context, results: &[(u8, usize)]) {
-        let pressed = ctx.input_mut(|i| {
-            let copy = i.events.iter().any(|e| matches!(e, Event::Copy));
-            i.events.retain(|e| !matches!(e, Event::Copy));
-            [
-                i.consume_key(Modifiers::SHIFT, Key::Enter),
-                i.consume_key(Modifiers::NONE, Key::Enter),
-                i.consume_key(Modifiers::NONE, Key::Escape),
-                i.consume_key(Modifiers::NONE, Key::ArrowUp),
-                i.consume_key(Modifiers::NONE, Key::ArrowDown),
-                i.consume_key(Modifiers::NONE, Key::ArrowRight)
-                    || i.consume_key(Modifiers::NONE, Key::Tab),
-                i.consume_key(Modifiers::NONE, Key::ArrowLeft)
-                    || i.consume_key(Modifiers::SHIFT, Key::Tab),
-                copy,
-                i.consume_key(Modifiers::COMMAND, Key::Num1),
-                i.consume_key(Modifiers::COMMAND, Key::Num2),
-                i.consume_key(Modifiers::COMMAND, Key::Num3),
-                i.consume_key(Modifiers::COMMAND, Key::L),
-                i.consume_key(Modifiers::COMMAND, Key::Q),
-            ]
-        });
-        let [
-            shift_enter,
-            enter,
-            escape,
-            up,
-            down,
-            right,
-            left,
-            copy,
-            f1,
-            f2,
-            f3,
-            lock,
-            quit,
-        ] = pressed;
-
-        if quit {
-            self.quitting = true;
-            if let Some(session) = self.session.take() {
-                vault::lock(&session);
-            }
-            self.egui.send_viewport_cmd(ViewportCommand::Close);
-            return;
-        }
-        if escape {
-            if self.pane == Pane::Fields {
-                self.pane = Pane::List;
-            } else {
-                self.hide(true);
-            }
-        }
-        if self.mode == Mode::Locked && (enter || shift_enter) {
-            self.unlock();
-        }
-        if self.mode != Mode::Ready {
-            return;
-        }
-        if lock {
-            self.lock();
-            return;
-        }
-        let Some(n) = self.current(results) else {
-            return;
-        };
-        let item_fields = fields(&self.items[n]);
-        self.field = self.field.min(item_fields.len().saturating_sub(1));
-        match self.pane {
-            Pane::List => {
-                if up || down {
-                    self.selected = if up {
-                        self.selected.saturating_sub(1)
-                    } else {
-                        (self.selected + 1).min(results.len() - 1)
-                    };
-                    self.scroll_to_selected = true;
-                }
-                if right && !item_fields.is_empty() {
-                    self.pane = Pane::Fields;
-                    self.field = 0;
-                }
-            }
-            Pane::Fields => {
-                if up {
-                    self.field = self.field.saturating_sub(1);
-                }
-                if down {
-                    self.field = (self.field + 1).min(item_fields.len().saturating_sub(1));
-                }
-                if left {
-                    self.pane = Pane::List;
-                }
-            }
-        }
-        let focused_field = item_fields
-            .get(self.field)
-            .copied()
-            .filter(|_| self.pane == Pane::Fields);
-        if shift_enter {
-            self.run(Action::Fill(n, Some(Field::Password)));
-        } else if enter {
-            self.run(Action::Fill(n, focused_field));
-        } else if copy {
-            self.run(Action::Copy(n, focused_field.unwrap_or(Field::Password)));
-        } else if let Some(f) = [
-            (f1, Field::Username),
-            (f2, Field::Password),
-            (f3, Field::Totp),
-        ]
-        .into_iter()
-        .find_map(|(hit, f)| hit.then_some(f))
-        .filter(|f| item_fields.contains(f))
-        {
-            self.run(Action::Fill(n, Some(f)));
-        }
-    }
 }
 
 impl eframe::App for App {
@@ -457,7 +407,7 @@ impl eframe::App for App {
         }
         if self.visible {
             let focused = ctx.input(|i| i.viewport().focused.unwrap_or(false));
-            if self.had_focus && !focused && self.pending_fill.is_none() {
+            if self.had_focus && !focused && self.pending_fill.is_none() && !self.hello_prompt {
                 self.hide(false);
             }
             self.had_focus = focused;
@@ -474,6 +424,9 @@ impl eframe::App for App {
         self.keys(ui.ctx(), &results);
         if self.visible {
             self.draw(ui, &results);
+        }
+        if std::mem::take(&mut self.paste_unlock) {
+            self.unlock();
         }
     }
 

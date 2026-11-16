@@ -2,6 +2,8 @@
 
 mod app;
 mod context;
+mod hello;
+mod keys;
 mod matcher;
 mod output;
 mod theme;

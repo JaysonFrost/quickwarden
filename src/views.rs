@@ -4,6 +4,7 @@ use eframe::egui::{
 };
 
 use crate::app::{Action, App, Field, Mode, Pane, fields};
+use crate::hello;
 use crate::matcher::host;
 use crate::theme::{self, Palette, elide};
 use crate::totp;
@@ -422,6 +423,10 @@ impl App {
                 "Run `bw login` in a terminal, then press Ctrl+Shift+Space",
             ),
             Mode::Checking => ("Bitwarden", "Checking vault…"),
+            _ if self.hello_prompt => (
+                "Windows Hello",
+                "Confirm with your face, fingerprint or PIN",
+            ),
             _ if self.busy => ("Unlocking…", "Decrypting your vault"),
             _ => ("Unlock Bitwarden", "Enter your master password"),
         };
@@ -464,10 +469,33 @@ impl App {
             p.text(
                 pos2(center.x, field.bottom() + 22.0),
                 Align2::CENTER_CENTER,
-                "Press Enter to unlock",
+                "Press Enter or paste to unlock",
                 FontId::proportional(12.0),
                 pal.muted,
             );
+            if hello::enrolled() {
+                let button = Rect::from_center_size(
+                    pos2(center.x, field.bottom() + 62.0),
+                    vec2(250.0, 34.0),
+                );
+                let response = ui.interact(button, ui.scope_id().with("hello"), Sense::click());
+                let fill = if response.hovered() {
+                    pal.selected
+                } else {
+                    pal.accent_soft
+                };
+                p.rect_filled(button, 9.0, fill);
+                p.text(
+                    button.center(),
+                    Align2::CENTER_CENTER,
+                    format!("Unlock with Windows Hello   {MOD}+H"),
+                    FontId::proportional(13.0),
+                    pal.accent,
+                );
+                if response.clicked() {
+                    self.hello_unlock();
+                }
+            }
         } else if self.mode != Mode::LoggedOut {
             ui.put(
                 Rect::from_center_size(field.center(), vec2(26.0, 26.0)),
