@@ -1,7 +1,7 @@
 use eframe::egui::{self, Event, Key, Modifiers, ViewportCommand};
 
 use crate::app::{Action, App, Field, Mode, Pane, fields};
-use crate::{hello, vault};
+use crate::{hello, keep, vault};
 
 impl App {
     pub(crate) fn keys(&mut self, ctx: &egui::Context, results: &[(u8, usize)]) {
@@ -53,6 +53,7 @@ impl App {
         if quit {
             self.quitting = true;
             if let Some(session) = self.session.take()
+                && !keep::SUPPORTED
                 && !hello::enrolled()
             {
                 vault::lock(&session);

@@ -27,7 +27,10 @@ Bitwarden is a great open-source password manager, but outside the browser exten
 - **Pick a single field**: fill or copy just the email, the password or the one-time code. <kbd>Ctrl</kbd>+<kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd> fill them instantly.
 - **Built-in TOTP**: live two-factor codes with a countdown, computed locally from your Bitwarden TOTP secrets.
 - **Context aware**: suggests logins for the website open in Chrome, Edge, Brave, Vivaldi, Opera, Firefox, Safari or Arc, or for the active app.
-- **Windows Hello unlock**: after the first unlock, use your face, fingerprint or PIN instead of the master password.
+- **Unlock once per boot**: on Windows the vault stays unlocked until you lock it (<kbd>Ctrl</kbd>+<kbd>L</kbd>), sign out or restart, even if you quit and reopen Quickwarden.
+- **Windows Hello unlock**: after a restart, use your face, fingerprint or PIN instead of the master password.
+- **Instant start**: logins appear from the local `bw` cache right away while syncing with the server runs in the background.
+- **Movable window**: drag it by any empty area.
 - **Paste to unlock**: pasting the master password unlocks immediately.
 - **Safe clipboard**: copied secrets are kept out of clipboard history and cleared after 30 seconds.
 - **Native and small**: a single Rust binary, no Electron, no background web server.
@@ -75,7 +78,7 @@ On macOS use <kbd>Cmd</kbd> instead of <kbd>Ctrl</kbd> inside the window.
 ## How it works
 
 - Your vault is read through the official Bitwarden CLI (`bw`). Quickwarden never talks to Bitwarden servers itself, so it works with bitwarden.com, Bitwarden EU, self-hosted Bitwarden and Vaultwarden.
-- Decrypted logins stay only in memory and are dropped on lock, after 15 minutes of inactivity and on quit.
+- Decrypted logins stay only in memory. To keep the vault unlocked until restart, the `bw` session key is encrypted with Windows DPAPI and kept in a volatile registry key (`HKCU\Software\Quickwarden`) that Windows deletes on restart or sign-out. <kbd>Ctrl</kbd>+<kbd>L</kbd> deletes it immediately.
 - Windows Hello protects the `bw` session key with AES-256-GCM under a key that only your Windows Hello credential (stored in the TPM) can produce. Your master password is never stored.
 - No local HTTP server (`bw serve`) is used.
 

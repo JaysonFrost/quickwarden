@@ -3,7 +3,9 @@
 mod app;
 mod context;
 mod hello;
+mod keep;
 mod keys;
+mod lock_view;
 mod matcher;
 mod output;
 mod theme;

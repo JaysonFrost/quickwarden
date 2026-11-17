@@ -91,8 +91,12 @@ pub fn unlock(password: &str) -> Result<String, String> {
     Ok(out.trim().to_string())
 }
 
-pub fn load(session: &str) -> Result<Vec<Item>, String> {
+pub fn sync_and_load(session: &str) -> Result<Vec<Item>, String> {
     run(Some(session), &["sync"], &[])?;
+    load(session)
+}
+
+pub fn load(session: &str) -> Result<Vec<Item>, String> {
     let raw: Vec<RawItem> = serde_json::from_str(&run(Some(session), &["list", "items"], &[])?)
         .map_err(|e| e.to_string())?;
     Ok(parse(raw))

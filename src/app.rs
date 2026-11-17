@@ -7,9 +7,8 @@ use global_hotkey::GlobalHotKeyManager;
 use crate::context::{self, Ctx};
 use crate::output::{self, Part};
 use crate::vault::{self, Item};
-use crate::{hello, matcher, totp};
+use crate::{hello, keep, matcher, totp};
 
-const LOCK_AFTER: Duration = Duration::from_secs(15 * 60);
 const FILL_DELAY: Duration = Duration::from_millis(250);
 const SESSION_EXPIRED: &str = "Saved Windows Hello unlock expired, enter the master password";
 
@@ -20,6 +19,7 @@ pub enum Msg {
     HelloUnlocked(Result<(String, Vec<Item>), String>),
     Enrolled(Result<(), String>),
     Loaded(Result<Vec<Item>, String>),
+    Refreshed(Result<Vec<Item>, String>),
     Url(isize, String),
 }
 
@@ -113,7 +113,6 @@ pub struct App {
     pub(crate) quitting: bool,
     pub(crate) hello_prompt: bool,
     pub(crate) paste_unlock: bool,
-    last_used: Instant,
     pending_fill: Option<(Vec<Part>, Instant)>,
 }
 
@@ -129,7 +128,7 @@ impl App {
             tx,
             rx,
             _hotkeys: hotkeys,
-            session: vault::env_session(),
+            session: vault::env_session().or_else(keep::load),
             items: Vec::new(),
             ctx: Ctx::default(),
             query: String::new(),
@@ -145,7 +144,6 @@ impl App {
             quitting: false,
             hello_prompt: false,
             paste_unlock: false,
-            last_used: Instant::now(),
             pending_fill: None,
         };
         app.check_status();
@@ -169,11 +167,16 @@ impl App {
     }
 
     fn handle(&mut self, msg: Msg) {
-        if !matches!(msg, Msg::Show | Msg::Url(..) | Msg::Enrolled(_)) {
+        if !matches!(
+            msg,
+            Msg::Show | Msg::Url(..) | Msg::Enrolled(_) | Msg::Refreshed(_)
+        ) {
             self.busy = false;
         }
         if matches!(msg, Msg::HelloUnlocked(_) | Msg::Enrolled(_)) {
             self.hello_prompt = false;
+            self.egui
+                .send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
             if self.visible {
                 self.egui.send_viewport_cmd(ViewportCommand::Focus);
             }
@@ -186,6 +189,7 @@ impl App {
             }
             Msg::Status(Ok(s)) if s == "unauthenticated" => self.mode = Mode::LoggedOut,
             Msg::Status(Ok(_)) => {
+                self.session = None;
                 self.set_locked("");
                 if hello::enrolled() && self.visible {
                     self.hello_unlock();
@@ -196,13 +200,21 @@ impl App {
                 if !hello::enrolled() {
                     self.hello_enroll(session.clone());
                 }
+                keep::save(&session);
                 self.session = Some(session);
                 self.set_ready(items);
             }
             Msg::HelloUnlocked(Ok((session, items))) => {
+                keep::save(&session);
                 self.session = Some(session);
                 self.set_ready(items);
             }
+            Msg::Refreshed(Ok(items)) => {
+                if self.mode == Mode::Ready {
+                    self.items = items;
+                }
+            }
+            Msg::Refreshed(Err(_)) => {}
             Msg::HelloUnlocked(Err(e)) => {
                 if e == SESSION_EXPIRED {
                     hello::forget();
@@ -228,6 +240,7 @@ impl App {
     }
 
     fn set_locked(&mut self, error: &str) {
+        keep::clear();
         self.mode = Mode::Locked;
         self.items.clear();
         self.query.clear();
@@ -240,6 +253,13 @@ impl App {
         self.query.clear();
         self.error.clear();
         self.reset_selection();
+        if let Some(session) = self.session.clone() {
+            let (tx, egui) = (self.tx.clone(), self.egui.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(Msg::Refreshed(vault::sync_and_load(&session)));
+                egui.request_repaint();
+            });
+        }
     }
 
     pub(crate) fn reset_selection(&mut self) {
@@ -263,7 +283,6 @@ impl App {
             self.had_focus = false;
             self.egui.send_viewport_cmd(ViewportCommand::Visible(true));
         }
-        self.last_used = Instant::now();
         self.egui.send_viewport_cmd(ViewportCommand::Focus);
         if matches!(self.mode, Mode::Locked | Mode::LoggedOut)
             && self.session.is_none()
@@ -298,6 +317,8 @@ impl App {
         }
         self.error.clear();
         self.hello_prompt = true;
+        self.egui
+            .send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
         self.spawn(|| {
             Msg::HelloUnlocked(hello::unlock().and_then(|session| {
                 if vault::status(Some(&session))? != "unlocked" {
@@ -311,6 +332,8 @@ impl App {
     fn hello_enroll(&mut self, session: String) {
         let (tx, egui) = (self.tx.clone(), self.egui.clone());
         self.hello_prompt = true;
+        self.egui
+            .send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
         std::thread::spawn(move || {
             let result = if hello::available() {
                 hello::enroll(&session)
@@ -396,13 +419,6 @@ impl eframe::App for App {
                 }
             } else {
                 ctx.request_repaint_after(*at - now);
-            }
-        }
-        if !self.visible && self.session.is_some() {
-            if self.last_used.elapsed() > LOCK_AFTER {
-                self.lock();
-            } else {
-                ctx.request_repaint_after(Duration::from_secs(30));
             }
         }
         if self.visible {

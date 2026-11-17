@@ -1,6 +1,6 @@
 [package]
 name = "quickwarden"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Quick access for Bitwarden: a global-hotkey password picker with autofill, TOTP and Windows Hello for Windows and macOS"
@@ -29,5 +29,5 @@ totp-rs = { version = "6.0.0", features = ["otpauth"] }
 
 [target."cfg(windows)".dependencies]
 uiautomation = "0.25.1"
-windows = { version = "0.62.2", features = ["Security_Credentials", "Security_Cryptography", "Storage_Streams", "Foundation", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+windows = { version = "0.62.2", features = ["Security_Credentials", "Security_Cryptography", "Storage_Streams", "Foundation", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Registry", "Win32_Security_Cryptography"] }
 windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading"] }
